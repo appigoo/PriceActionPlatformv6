@@ -1319,11 +1319,45 @@ def _render_gap_history(df, ticker: str, interval: str):
         for col in ['Open','High','Low','Close']:
             _diag_df[col] = _diag_df[col].round(2)
         st.dataframe(_diag_df, use_container_width=True)
+
+        # ── 抓取執行日誌 ────────────────────────────────────────────────
+        _at        = getattr(df, "attrs", {})
+        _strategy_d= _at.get("strategy", "unknown")
+        _fetch_td  = _at.get("fetch_time", "-")
         st.caption(
-            f"數據來源：yfinance（auto_adjust=True）　"
-            f"最新日期：{str(df.index[-1])[:10]}　"
-            f"總根數：{len(df)}"
+            f"成功策略：{_strategy_d}　抓取時間：{_fetch_td}　"
+            f"最新K線：{str(df.index[-1])[:10]}　總根數：{len(df)}"
         )
+
+        _log_d = _at.get("log", [])
+        if _log_d:
+            st.markdown("**抓取執行日誌（依序嘗試，`ok` 代表該策略成功）：**")
+            _log_html = ""
+            for _step in _log_d:
+                if ":ok" in _step or "重建" in _step or "補" in _step:
+                    _c, _icon = "#3d8c5f", "✅"
+                elif "缺" in _step or "無需" in _step:
+                    _c, _icon = "#6b6560", "•"
+                else:
+                    _c, _icon = "#c0392b", "✗"
+                _log_html += (
+                    f"<div style='font-family:IBM Plex Mono,monospace;font-size:.72rem;"
+                    f"color:{_c};padding:1px 0'>{_icon} {_step}</div>"
+                )
+            st.markdown(_log_html, unsafe_allow_html=True)
+
+        _raw_d  = _at.get("raw_latest", "")
+        _nan_d  = _at.get("filtered_nan", [])
+        _zero_d = _at.get("filtered_zero_vol", [])
+        _notes  = []
+        if _raw_d and _raw_d != str(df.index[-1])[:10]:
+            _notes.append(f"yfinance 原始回傳最新日期 {_raw_d}")
+        if _nan_d:
+            _notes.append(f"因 OHLC 全為 NaN 被剔除：{'、'.join(_nan_d)}")
+        if _zero_d:
+            _notes.append(f"因成交量為 0 被剔除：{'、'.join(_zero_d)}")
+        if _notes:
+            st.caption("　|　".join(_notes))
         # Gap check with ATR filter diagnosis
         st.markdown("**最近3根間的跳空偵測（含ATR過濾診斷）：**")
         import numpy as _np_d
@@ -2481,22 +2515,23 @@ def render_ticker(ctx: dict):
     try:
         _today     = _dt2.utcnow().strftime('%Y-%m-%d')
         _df_date   = df_latest
-        _days_old  = (_dt2.strptime(_today,'%Y-%m-%d') - _dt2.strptime(_df_date,'%Y-%m-%d')).days
-        _trading_days_old = max(0, _days_old - (_days_old // 7) * 2)
-        # 抓取策略信息
-        _strategy    = getattr(df, "attrs", {}).get("strategy", "unknown")
-        _fetch_t     = getattr(df, "attrs", {}).get("fetch_time", "")
-        _raw_latest  = getattr(df, "attrs", {}).get("raw_latest", "")
-        _zero_dates  = getattr(df, "attrs", {}).get("filtered_zero_vol", [])
-        _nan_dates   = getattr(df, "attrs", {}).get("filtered_nan", [])
-        _raw_info    = f"(原始最新:{_raw_latest})" if _raw_latest and _raw_latest != _df_date else ""
-        _zero_info   = f" 零量過濾:{','.join(_zero_dates)}" if _zero_dates else ""
-        _nan_info    = f" NaN過濾:{','.join(_nan_dates)}" if _nan_dates else ""
-        _strat_tip   = f" [{_strategy}{_raw_info}{_zero_info}{_nan_info}]" if _strategy not in ("none","unknown","") else ""
-        if _trading_days_old >= 3:
+        # 精確計算落後幾個交易日（只數平日，不含資料當日）
+        from datetime import timedelta as _td2
+        _d_cur  = _dt2.strptime(_df_date, '%Y-%m-%d').date()
+        _d_now  = _dt2.strptime(_today,   '%Y-%m-%d').date()
+        _trading_days_old = 0
+        _walk = _d_cur + _td2(days=1)
+        while _walk <= _d_now:
+            if _walk.weekday() < 5:
+                _trading_days_old += 1
+            _walk += _td2(days=1)
+        # 抓取策略（詳細診斷移至「數據診斷」面板，徽章只保留關鍵訊息）
+        _strategy  = getattr(df, "attrs", {}).get("strategy", "unknown")
+        _strat_tip = f" · {_strategy}" if _strategy not in ("none", "unknown", "") else ""
+        if _trading_days_old >= 2:
             _fresh_badge = (f"<span style='background:#fdecea;color:#c0392b;border-radius:4px;"
                            f"padding:1px 7px;font-size:.66rem;margin-left:8px'>"
-                           f"⚠️ 數據停在 {_df_date}（落後{_trading_days_old}交易日）{_strat_tip}　請重新分析</span>")
+                           f"⚠️ 數據停在 {_df_date}（落後{_trading_days_old}交易日）{_strat_tip}</span>")
         elif _trading_days_old >= 1:
             _fresh_badge = (f"<span style='background:#fff3e0;color:#b07d2e;border-radius:4px;"
                            f"padding:1px 7px;font-size:.66rem;margin-left:8px'>"
