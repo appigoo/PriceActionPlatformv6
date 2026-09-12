@@ -575,6 +575,126 @@ def _fetch_market_env() -> dict:
     return result
 
 
+def _build_multi_stock_prompt(cached: dict, interval_lbl: str) -> str:
+    """
+    彙整 session_state.cached 裡所有已分析股票的關鍵數據，
+    生成一份「排序比較」Prompt，交給 AI 判斷今日最值得關注的標的。
+    只取已分析過的股票；未分析的不列入（避免用陳舊/空白數據誤導 AI）。
+    """
+    import datetime as _dt
+
+    now = _dt.datetime.now().strftime('%Y-%m-%d %H:%M')
+    nl  = chr(10)
+
+    rows = []
+    for tk, ctx in cached.items():
+        try:
+            df_          = ctx["df"]
+            market_struct= ctx["market_struct"]
+            signals_     = ctx["signals"]
+            scores_      = ctx["scores"]
+            sr_          = ctx["sr_levels"]
+            volume_      = ctx["volume_analysis"]
+
+            current   = float(df_['Close'].iloc[-1])
+            prev      = float(df_['Close'].iloc[-2])
+            chg_pct   = (current - prev) / prev * 100 if prev else 0.0
+
+            trend     = market_struct.get('trend', '-')
+            sig       = signals_.get('primary', 'NEUTRAL')
+            strength  = signals_.get('strength', '-')
+            overall   = scores_.get('overall_rating', '-')
+            conf      = scores_.get('confidence', 0)
+            vol_r     = volume_.get('vol_ratio', 1.0)
+
+            trade     = signals_.get('trade_setup', {})
+            key_sup   = trade.get('key_support', 0)
+            key_res   = trade.get('key_resistance', 0)
+            rrr       = trade.get('rrr', 'N/A')
+            entry_warn= bool(trade.get('entry_warning', '') or trade.get('rrr_poor', False))
+
+            dist_sup  = (current - key_sup) / current * 100 if key_sup else None
+            dist_res  = (key_res - current) / current * 100 if key_res else None
+
+            dist_sup_s = f"{dist_sup:.1f}%" if dist_sup is not None else "-"
+            dist_res_s = f"{dist_res:.1f}%" if dist_res is not None else "-"
+            warn_s     = " ⚠️入場條件差" if entry_warn else ""
+
+            rows.append({
+                'ticker': tk, 'current': current, 'chg_pct': chg_pct,
+                'trend': trend, 'sig': sig, 'strength': strength,
+                'overall': overall, 'conf': conf, 'vol_r': vol_r,
+                'dist_sup': dist_sup_s, 'dist_res': dist_res_s,
+                'rrr': rrr, 'warn': warn_s,
+            })
+        except Exception:
+            continue
+
+    if not rows:
+        return "（尚無已分析的股票數據，請先在各分頁點擊「分析」後再生成比較 Prompt）"
+
+    # 依訊號分組：BUY / SELL / NEUTRAL，方便 AI 快速掃視
+    buy_rows  = [r for r in rows if r['sig'] == 'BUY']
+    sell_rows = [r for r in rows if r['sig'] == 'SELL']
+    neu_rows  = [r for r in rows if r['sig'] not in ('BUY', 'SELL')]
+
+    def _fmt_row(r):
+        return (
+            f"  {r['ticker']:<6} ${r['current']:.2f}（{r['chg_pct']:+.2f}%）　"
+            f"{r['trend']}　訊號:{r['sig']}({r['strength']})　"
+            f"評級:{r['overall']} 信心{r['conf']}%　"
+            f"量比:{r['vol_r']:.1f}x　距支撐:{r['dist_sup']} 距阻力:{r['dist_res']}　"
+            f"風報比:{r['rrr']}{r['warn']}"
+        )
+
+    lines = [
+        '你是一位管理多支美股觀察名單的專業交易員，需要在有限時間內判斷',
+        '「今天最值得優先關注、甚至立即行動」的標的。',
+        '請根據以下所有股票的技術分析數據做橫向比較，不要逐支平均分配篇幅，',
+        '而是像真正管理資金的人一樣，聚焦在最有機會/風險的少數幾支上。',
+        '',
+        '=' * 60,
+        '【比較時間 / 週期】',
+        '=' * 60,
+        f'時間：{now}　週期：{interval_lbl}　股票數：{len(rows)}',
+        '',
+        '=' * 60,
+        f'【BUY 訊號（{len(buy_rows)}支）】',
+        '=' * 60,
+    ]
+    lines += [_fmt_row(r) for r in buy_rows] or ['  （無）']
+    lines += [
+        '',
+        '=' * 60,
+        f'【SELL 訊號（{len(sell_rows)}支）】',
+        '=' * 60,
+    ]
+    lines += [_fmt_row(r) for r in sell_rows] or ['  （無）']
+    lines += [
+        '',
+        '=' * 60,
+        f'【中性/觀望（{len(neu_rows)}支）】',
+        '=' * 60,
+    ]
+    lines += [_fmt_row(r) for r in neu_rows] or ['  （無）']
+    lines += [
+        '',
+        '=' * 60,
+        '【請完成以下比較分析（用繁體中文回答）】',
+        '=' * 60,
+        '1. 【優先排序】依「當下最值得關注程度」由高到低排序全部股票，並各給一句話理由',
+        '   （不是只看訊號方向，也要考慮信心高低、風報比、距關鍵位遠近）。',
+        '2. 【同向分歧】找出訊號方向相同、但信心或風報比明顯不同的股票，指出哪一個更可信、為什麼。',
+        '3. 【風險標記】哪些股票目前入場條件差（⚠️標記）或風報比不佳，應排除在今日操作之外。',
+        '4. 【Top 3 觀察名單】給出今天最值得追蹤的 3 支股票，並各自說明關鍵觸發價位。',
+        '',
+        '⚠️ 注意：各股信心普遍偏低時（如全部 <50%），請在排序時特別提醒，',
+        '避免對任何單一標的過度自信。像真正管理資金的交易員一樣給出取捨判斷。',
+    ]
+
+    return nl.join(lines)
+
+
 def _build_ai_prompt(ticker, interval_lbl, df, patterns, market_struct,
                      volume_analysis, sr_levels, smart_money, signals,
                      scores, ai_text) -> str:
@@ -3036,6 +3156,30 @@ if analyze_all:
     st.rerun()
 
 # 個別分析按鈕：放在 Tab 內部，由 render_ticker 處理
+
+# ── 多股排序比較 Prompt ─────────────────────────────────────────────────────
+_cached_count = len(st.session_state.cached)
+_mp_col1, _mp_col2 = st.columns([1, 3])
+with _mp_col1:
+    _mp_clicked = st.button(
+        f"📊 生成多股比較 Prompt（{_cached_count}支已分析）",
+        use_container_width=True,
+        disabled=(_cached_count == 0),
+    )
+if _mp_clicked:
+    st.session_state["_multi_stock_prompt"] = _build_multi_stock_prompt(
+        st.session_state.cached, interval_lbl
+    )
+if st.session_state.get("_multi_stock_prompt"):
+    with st.expander("📋 多股比較 Prompt（全選複製後貼入任意 AI）", expanded=True):
+        st.text_area(
+            "多股比較 Prompt",
+            value=st.session_state["_multi_stock_prompt"],
+            height=280,
+            key="_multi_stock_prompt_area",
+            label_visibility="collapsed",
+        )
+        st.caption("💡 只彙整已分析過的股票；點擊文字框 → Ctrl+A 全選 → Ctrl+C 複製")
 
 # Tabs
 tab_labels = []
