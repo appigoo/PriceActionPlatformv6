@@ -575,6 +575,47 @@ def _fetch_market_env() -> dict:
     return result
 
 
+def _get_market_env_cached() -> dict:
+    """
+    共用的大盤環境快取（5分鐘 TTL），避免單股 Prompt 和多股比較 Prompt
+    各自重複打 yfinance。VIX/SPY/QQQ 三者一起抓、一起快取。
+    """
+    import time as _time
+    env_key   = '_market_env_cache'
+    env_cache = st.session_state.get(env_key, {})
+    env_stale = (_time.time() - env_cache.get('_ts', 0)) > 300
+    if env_stale:
+        env = _fetch_market_env()
+        env['_ts'] = _time.time()
+        st.session_state[env_key] = env
+        return env
+    return env_cache
+
+
+def _vix_desc(vix_level: float) -> str:
+    if vix_level > 30:
+        return "恐慌（>30，市場風險高，訊號可信度需大幅打折）"
+    elif vix_level > 20:
+        return "偏高（20-30，波動放大，謹慎看待訊號）"
+    else:
+        return "正常（<20，市場情緒穩定）"
+
+
+def _short_entry_warn(trade: dict) -> str:
+    """把完整的 entry_warning 濃縮成一句話標籤，避免多股比較表格被拉長"""
+    warn = trade.get('entry_warning', '')
+    if warn:
+        # 取第一個逗號/句號前的子句作為精簡標籤
+        for sep in ('，', '。', ','):
+            if sep in warn:
+                warn = warn.split(sep)[0]
+                break
+        return warn[:16]
+    if trade.get('rrr_poor', False):
+        return f"風報比{trade.get('rrr','N/A')}過低"
+    return ""
+
+
 def _build_multi_stock_prompt(cached: dict, interval_lbl: str) -> str:
     """
     彙整 session_state.cached 裡所有已分析股票的關鍵數據，
@@ -586,6 +627,13 @@ def _build_multi_stock_prompt(cached: dict, interval_lbl: str) -> str:
     now = _dt.datetime.now().strftime('%Y-%m-%d %H:%M')
     nl  = chr(10)
 
+    # ── 大盤與 VIX（判讀所有個股訊號的前提，放最前面）────────────────────────
+    env      = _get_market_env_cached()
+    vix_lvl  = env.get('vix', 0) or 0
+    mkt_avg  = None
+    if env.get('spy_chg') is not None and env.get('qqq_chg') is not None:
+        mkt_avg = (env['spy_chg'] + env['qqq_chg']) / 2
+
     rows = []
     for tk, ctx in cached.items():
         try:
@@ -593,7 +641,6 @@ def _build_multi_stock_prompt(cached: dict, interval_lbl: str) -> str:
             market_struct= ctx["market_struct"]
             signals_     = ctx["signals"]
             scores_      = ctx["scores"]
-            sr_          = ctx["sr_levels"]
             volume_      = ctx["volume_analysis"]
 
             current   = float(df_['Close'].iloc[-1])
@@ -606,26 +653,32 @@ def _build_multi_stock_prompt(cached: dict, interval_lbl: str) -> str:
             overall   = scores_.get('overall_rating', '-')
             conf      = scores_.get('confidence', 0)
             vol_r     = volume_.get('vol_ratio', 1.0)
+            buy_sc    = signals_.get('buy_score', 0)
+            sell_sc   = signals_.get('sell_score', 0)
 
             trade     = signals_.get('trade_setup', {})
             key_sup   = trade.get('key_support', 0)
             key_res   = trade.get('key_resistance', 0)
             rrr       = trade.get('rrr', 'N/A')
-            entry_warn= bool(trade.get('entry_warning', '') or trade.get('rrr_poor', False))
+            warn_txt  = _short_entry_warn(trade)
 
             dist_sup  = (current - key_sup) / current * 100 if key_sup else None
             dist_res  = (key_res - current) / current * 100 if key_res else None
-
             dist_sup_s = f"{dist_sup:.1f}%" if dist_sup is not None else "-"
             dist_res_s = f"{dist_res:.1f}%" if dist_res is not None else "-"
-            warn_s     = " ⚠️入場條件差" if entry_warn else ""
+
+            rel_s = ""
+            if mkt_avg is not None:
+                rel = chg_pct - mkt_avg
+                rel_s = f"，vs大盤{rel:+.1f}%"
 
             rows.append({
-                'ticker': tk, 'current': current, 'chg_pct': chg_pct,
+                'ticker': tk, 'current': current, 'chg_pct': chg_pct, 'rel_s': rel_s,
                 'trend': trend, 'sig': sig, 'strength': strength,
+                'buy_sc': buy_sc, 'sell_sc': sell_sc,
                 'overall': overall, 'conf': conf, 'vol_r': vol_r,
                 'dist_sup': dist_sup_s, 'dist_res': dist_res_s,
-                'rrr': rrr, 'warn': warn_s,
+                'rrr': rrr, 'warn': f" ⚠️{warn_txt}" if warn_txt else "",
             })
         except Exception:
             continue
@@ -640,8 +693,8 @@ def _build_multi_stock_prompt(cached: dict, interval_lbl: str) -> str:
 
     def _fmt_row(r):
         return (
-            f"  {r['ticker']:<6} ${r['current']:.2f}（{r['chg_pct']:+.2f}%）　"
-            f"{r['trend']}　訊號:{r['sig']}({r['strength']})　"
+            f"  {r['ticker']:<6} ${r['current']:.2f}（{r['chg_pct']:+.2f}%{r['rel_s']}）　"
+            f"{r['trend']}　訊號:{r['sig']}({r['strength']}) 得分{r['buy_sc']}:{r['sell_sc']}　"
             f"評級:{r['overall']} 信心{r['conf']}%　"
             f"量比:{r['vol_r']:.1f}x　距支撐:{r['dist_sup']} 距阻力:{r['dist_res']}　"
             f"風報比:{r['rrr']}{r['warn']}"
@@ -652,6 +705,35 @@ def _build_multi_stock_prompt(cached: dict, interval_lbl: str) -> str:
         '「今天最值得優先關注、甚至立即行動」的標的。',
         '請根據以下所有股票的技術分析數據做橫向比較，不要逐支平均分配篇幅，',
         '而是像真正管理資金的人一樣，聚焦在最有機會/風險的少數幾支上。',
+        '',
+        '=' * 60,
+        '【大盤與波動環境（判讀以下所有個股訊號前必看）】',
+        '=' * 60,
+    ]
+
+    if env.get('error'):
+        lines.append(f'  （大盤數據獲取失敗：{env["error"]}，請自行評估大盤環境）')
+    else:
+        vix_line = f'  VIX恐慌指數：{vix_lvl:.1f}（{_vix_desc(vix_lvl)}）' if vix_lvl else '  VIX：數據不可用'
+        spy_line = (f'  SPY：${env["spy_close"]:.2f}（{env["spy_chg"]:+.2f}%），短期趨勢 {env["spy_trend"]}'
+                    if env.get('spy_close') else '  SPY：數據不可用')
+        qqq_line = (f'  QQQ：${env["qqq_close"]:.2f}（{env["qqq_chg"]:+.2f}%），短期趨勢 {env["qqq_trend"]}'
+                    if env.get('qqq_close') else '  QQQ：數據不可用')
+        lines += [vix_line, spy_line, qqq_line]
+
+    lines += [
+        '',
+        '  ⚠️ VIX 判讀規則（請在做排序與取捨時套用）：',
+        '    VIX > 30：恐慌行情，多數 BUY 訊號可能只是恐慌反彈，可信度需大幅下修，優先觀望',
+        '    VIX 20-30：波動放大，訊號需搭配風報比更嚴格篩選，避免追價',
+        '    VIX < 20：市場情緒穩定，可依常規技術面邏輯判斷',
+    ]
+    if mkt_avg is not None:
+        lines += [
+            '  💡 若清單中多數股票同向（例如14支同時BUY），且大盤本身也同向大漲，',
+            '     這很可能只是「大盤普漲」而非個股訊號，請用上方「vs大盤」欄位找出真正跑贏/跑輸的股票。',
+        ]
+    lines += [
         '',
         '=' * 60,
         '【比較時間 / 週期】',
@@ -683,9 +765,10 @@ def _build_multi_stock_prompt(cached: dict, interval_lbl: str) -> str:
         '【請完成以下比較分析（用繁體中文回答）】',
         '=' * 60,
         '1. 【優先排序】依「當下最值得關注程度」由高到低排序全部股票，並各給一句話理由',
-        '   （不是只看訊號方向，也要考慮信心高低、風報比、距關鍵位遠近）。',
-        '2. 【同向分歧】找出訊號方向相同、但信心或風報比明顯不同的股票，指出哪一個更可信、為什麼。',
-        '3. 【風險標記】哪些股票目前入場條件差（⚠️標記）或風報比不佳，應排除在今日操作之外。',
+        '   （不是只看訊號方向，也要考慮信心高低、風報比、距關鍵位遠近、vs大盤相對強弱）。',
+        '2. 【同向分歧】找出訊號方向相同、但信心或得分明顯不同的股票，指出哪一個更可信、為什麼',
+        '   （注意：多支股票信心同為45%可能只是系統對風報比差的封頂值，請用「得分」欄位判斷真實強弱）。',
+        '3. 【風險標記】哪些股票目前入場條件差（⚠️已標註具體原因）或風報比不佳，應排除在今日操作之外。',
         '4. 【Top 3 觀察名單】給出今天最值得追蹤的 3 支股票，並各自說明關鍵觸發價位。',
         '',
         '⚠️ 注意：各股信心普遍偏低時（如全部 <50%），請在排序時特別提醒，',
@@ -817,32 +900,20 @@ def _build_ai_prompt(ticker, interval_lbl, df, patterns, market_struct,
         '=' * 60,
     ]
 
-    # 抓大盤數據（緩存於 session state 避免重複請求）
-    env_key = '_market_env_cache'
-    import time as _time
-    env_cache = st.session_state.get(env_key, {})
-    env_stale = (_time.time() - env_cache.get('_ts', 0)) > 300   # 5分鐘過期
-    if env_stale:
-        env = _fetch_market_env()
-        env['_ts'] = _time.time()
-        st.session_state[env_key] = env
-    else:
-        env = env_cache
+    # 抓大盤數據（緩存於 session state 避免重複請求，與多股比較 Prompt 共用）
+    env = _get_market_env_cached()
 
     if env.get('error'):
         lines.append(f'  （大盤數據獲取失敗：{env["error"]}，請自行評估大盤環境）')
     else:
+        vix_level = env.get('vix', 0) or 0
+        vix_line  = f'  VIX恐慌指數：{vix_level:.1f}（{_vix_desc(vix_level)}）' if vix_level else '  VIX：數據不可用'
         spy_line = (f'  SPY：${env["spy_close"]:.2f}（{env["spy_chg"]:+.2f}%），'
                     f'短期趨勢 {env["spy_trend"]}')      if env.get('spy_close') else '  SPY：數據不可用'
         qqq_line = (f'  QQQ：${env["qqq_close"]:.2f}（{env["qqq_chg"]:+.2f}%），'
                     f'短期趨勢 {env["qqq_trend"]}')      if env.get('qqq_close') else '  QQQ：數據不可用'
-        vix_level = env.get('vix', 0) or 0
-        vix_desc  = ('恐慌（>30，市場風險高）' if vix_level > 30
-                     else '偏高（20-30，謹慎）' if vix_level > 20
-                     else '正常（<20）')
-        vix_line  = f'  VIX恐慌指數：{vix_level:.1f}（{vix_desc}）' if vix_level else '  VIX：數據不可用'
 
-        lines += [spy_line, qqq_line, vix_line]
+        lines += [vix_line, spy_line, qqq_line]
 
         # 大盤 vs 個股背離提示
         if env.get('spy_chg') is not None and env.get('qqq_chg') is not None:
