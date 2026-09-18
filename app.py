@@ -538,14 +538,19 @@ def _bar(label, val, color):
 
 
 def _fetch_market_env() -> dict:
-    """抓取大盤環境：SPY 和 QQQ 最新數據，加入 Prompt 作為大盤背景"""
+    """
+    抓取大盤環境：SPY / QQQ / VIX。
+    同時記錄各自的資料日期，供「vs大盤」比較前做日期對齊檢查——
+    不同交易日的漲跌幅相減沒有意義，必須先確認同一天。
+    """
     result = {
         'spy_close': None, 'spy_chg': None, 'spy_trend': None,
         'qqq_close': None, 'qqq_chg': None, 'qqq_trend': None,
-        'vix': None, 'error': None,
+        'vix': None, 'mkt_date': None, 'error': None,
     }
     try:
         import yfinance as yf
+        dates_seen = []
         for sym, keys in [('SPY', ('spy_close','spy_chg','spy_trend')),
                            ('QQQ', ('qqq_close','qqq_chg','qqq_trend'))]:
             tk = yf.Ticker(sym)
@@ -562,6 +567,11 @@ def _fetch_market_env() -> dict:
                 result[keys[0]] = c0
                 result[keys[1]] = chg
                 result[keys[2]] = trend
+                dates_seen.append(str(df_m.index[-1])[:10])
+
+        # SPY/QQQ 需為同一交易日，否則大盤基準本身就不一致
+        if dates_seen:
+            result['mkt_date'] = dates_seen[0] if len(set(dates_seen)) == 1 else None
 
         # VIX
         vix_tk = yf.Ticker('^VIX')
@@ -630,11 +640,13 @@ def _build_multi_stock_prompt(cached: dict, interval_lbl: str) -> str:
     # ── 大盤與 VIX（判讀所有個股訊號的前提，放最前面）────────────────────────
     env      = _get_market_env_cached()
     vix_lvl  = env.get('vix', 0) or 0
+    mkt_date = env.get('mkt_date')
     mkt_avg  = None
     if env.get('spy_chg') is not None and env.get('qqq_chg') is not None:
         mkt_avg = (env['spy_chg'] + env['qqq_chg']) / 2
 
-    rows = []
+    rows          = []
+    date_mismatch = []   # 資料日期與大盤不一致的股票，vs大盤 一律不計算
     for tk, ctx in cached.items():
         try:
             df_          = ctx["df"]
@@ -646,6 +658,7 @@ def _build_multi_stock_prompt(cached: dict, interval_lbl: str) -> str:
             current   = float(df_['Close'].iloc[-1])
             prev      = float(df_['Close'].iloc[-2])
             chg_pct   = (current - prev) / prev * 100 if prev else 0.0
+            stock_date= str(df_.index[-1])[:10]
 
             trend     = market_struct.get('trend', '-')
             sig       = signals_.get('primary', 'NEUTRAL')
@@ -667,10 +680,15 @@ def _build_multi_stock_prompt(cached: dict, interval_lbl: str) -> str:
             dist_sup_s = f"{dist_sup:.1f}%" if dist_sup is not None else "-"
             dist_res_s = f"{dist_res:.1f}%" if dist_res is not None else "-"
 
+            # vs大盤 只在「個股與大盤同一交易日」時才計算，否則是拿不同天相減
             rel_s = ""
-            if mkt_avg is not None:
-                rel = chg_pct - mkt_avg
-                rel_s = f"，vs大盤{rel:+.1f}%"
+            if mkt_avg is not None and mkt_date:
+                if stock_date == mkt_date:
+                    rel = chg_pct - mkt_avg
+                    rel_s = f"，vs大盤{rel:+.1f}%"
+                else:
+                    rel_s = f"，資料{stock_date}"
+                    date_mismatch.append(f"{tk}({stock_date})")
 
             rows.append({
                 'ticker': tk, 'current': current, 'chg_pct': chg_pct, 'rel_s': rel_s,
@@ -720,6 +738,18 @@ def _build_multi_stock_prompt(cached: dict, interval_lbl: str) -> str:
         qqq_line = (f'  QQQ：${env["qqq_close"]:.2f}（{env["qqq_chg"]:+.2f}%），短期趨勢 {env["qqq_trend"]}'
                     if env.get('qqq_close') else '  QQQ：數據不可用')
         lines += [vix_line, spy_line, qqq_line]
+        if mkt_date:
+            lines.append(f'  大盤資料日期：{mkt_date}')
+        else:
+            lines.append('  ⚠️ SPY/QQQ 資料日期不一致，大盤基準不可靠，請勿據此做相對強弱判斷')
+
+    if date_mismatch:
+        lines += [
+            '',
+            f'  ⚠️ 以下股票資料日期與大盤({mkt_date})不同，已不計算 vs大盤，'
+            f'請勿對其做相對強弱比較：',
+            f'    {"、".join(date_mismatch)}',
+        ]
 
     lines += [
         '',
