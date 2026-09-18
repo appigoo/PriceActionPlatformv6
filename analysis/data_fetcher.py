@@ -260,27 +260,60 @@ def fetch_ohlcv(ticker: str, interval: str, bar_count: int = 120) -> pd.DataFram
     return df
 
 
+def _last_completed_session(now_et=None):
+    """
+    回傳最後一個「已收盤」的美股交易日（美東時間）。
+    盤前/盤中不把今天算成已完成，避免用未收盤資料當成完整日線。
+    now_et 可注入以便測試。
+    """
+    if now_et is None:
+        now_et = pd.Timestamp.utcnow().tz_convert('America/New_York')
+    d = now_et.date()
+    # 週末，或今天尚未收盤（ET 16:00 前）→ 往前找
+    if now_et.weekday() >= 5 or now_et.hour < 16:
+        d = d - timedelta(days=1)
+    while d.weekday() >= 5:
+        d = d - timedelta(days=1)
+    return d
+
+
 def _patch_missing_days(df: pd.DataFrame, tk, ticker: str,
-                        log: list) -> pd.DataFrame:
-    """日線落後時的補救：5m 重建 → yf.download → fast_info"""
+                        log: list, now_et=None) -> pd.DataFrame:
+    """
+    日線落後時的補救：只用「真實成交」重建缺失交易日。
+
+    核心原則（對應資料準確性目標）：
+      1. 絕不製造合成K線 —— 沒有真實成交量就不補，寧可顯示落後也不顯示假資料
+      2. 盤前不把今天當成缺失日（今天根本還沒開始交易）
+      3. 盤中可補當日「未完成」K線，但必須有真實成交量，並標記為 partial
+    """
     try:
-        today = datetime.utcnow().date()
-        last  = df.index[-1].date()
+        if now_et is None:
+            now_et = pd.Timestamp.utcnow().tz_convert('America/New_York')
+        today_et    = now_et.date()
+        last_closed = _last_completed_session(now_et)
+        last        = df.index[-1].date()
+
+        # 盤中（今天已開盤但未收盤）才允許補當日未完成K線
+        market_open_now = (now_et.weekday() < 5
+                           and (now_et.hour > 9 or (now_et.hour == 9 and now_et.minute >= 30))
+                           and now_et.hour < 16)
+        end_day = today_et if market_open_now else last_closed
 
         missing = []
         d = last + timedelta(days=1)
-        while d <= today:
+        while d <= end_day:
             if d.weekday() < 5:
                 missing.append(d)
             d += timedelta(days=1)
 
         if not missing:
-            log.append("patch:無需補充")
+            log.append(f"patch:無需補充(末{last},已收盤日{last_closed})")
             return df
 
         log.append(f"patch:缺{len(missing)}日({missing[0]}~{missing[-1]})")
 
-        # 方法A：5分鐘數據按日重建
+        # ── 方法A：5分鐘數據按日重建（要求真實成交量）──────────────────────
         try:
             intra = tk.history(period='5d', interval='5m',
                                auto_adjust=False, actions=False)
@@ -293,10 +326,15 @@ def _patch_missing_days(df: pd.DataFrame, tk, ticker: str,
                     iidx = iidx.tz_convert('America/New_York')
                 days = np.array([t.date() for t in iidx])
 
-                rebuilt_idx, rebuilt_rows = [], []
+                rebuilt_idx, rebuilt_rows, skipped = [], [], []
                 for md in missing:
                     sel = intra[days == md]
                     if len(sel) == 0:
+                        continue
+                    vol_sum = float(sel['Volume'].sum())
+                    if vol_sum <= 0:
+                        # 有K線但無成交（盤前掛單/資料佔位）→ 不補，避免製造假K線
+                        skipped.append(str(md))
                         continue
                     rebuilt_idx.append(pd.Timestamp(md))
                     rebuilt_rows.append({
@@ -304,7 +342,7 @@ def _patch_missing_days(df: pd.DataFrame, tk, ticker: str,
                         'High':   float(sel['High'].max()),
                         'Low':    float(sel['Low'].min()),
                         'Close':  float(sel['Close'].iloc[-1]),
-                        'Volume': float(sel['Volume'].sum()),
+                        'Volume': vol_sum,
                     })
 
                 if rebuilt_rows:
@@ -312,13 +350,18 @@ def _patch_missing_days(df: pd.DataFrame, tk, ticker: str,
                     df  = _concat_keep_attrs(df, add)
                     log.append(f"5m:重建{len(rebuilt_rows)}根"
                                f"@{rebuilt_rows[-1]['Close']:.2f}")
-                else:
+                    if rebuilt_idx[-1].date() == today_et and market_open_now:
+                        df.attrs['partial_last_bar'] = str(today_et)
+                        log.append(f"5m:末根為盤中未完成({today_et})")
+                if skipped:
+                    log.append(f"5m:零成交跳過({','.join(skipped)})")
+                if not rebuilt_rows and not skipped:
                     avail = sorted(set(days))[-3:]
                     log.append(f"5m:無對應日(有{','.join(str(a) for a in avail)})")
         except Exception as e:
             log.append(f"5m:{type(e).__name__}")
 
-        # 方法B：yf.download
+        # ── 方法B：yf.download（同樣要求真實成交量）─────────────────────────
         if df.index[-1].date() < missing[-1]:
             try:
                 dl = yf.download(ticker, period='5d', interval='1d',
@@ -332,12 +375,16 @@ def _patch_missing_days(df: pd.DataFrame, tk, ticker: str,
                     for c in ('Open', 'High', 'Low'):
                         if c in dl.columns:
                             dl[c] = dl[c].fillna(dl['Close'])
-                    if 'Volume' in dl.columns:
-                        dl['Volume'] = dl['Volume'].fillna(0)
                     dl.index = pd.to_datetime(dl.index)
                     if getattr(dl.index, 'tz', None) is not None:
                         dl.index = dl.index.tz_localize(None)
                     add = dl[dl.index > df.index[-1]]
+                    # 只收有真實成交量的K線
+                    if 'Volume' in add.columns:
+                        before = len(add)
+                        add = add[add['Volume'].fillna(0) > 0]
+                        if before > len(add):
+                            log.append(f"dl:濾掉{before-len(add)}根零成交")
                     if len(add) > 0:
                         df = _concat_keep_attrs(df, add)
                         log.append(f"dl:補{len(add)}根")
@@ -346,21 +393,20 @@ def _patch_missing_days(df: pd.DataFrame, tk, ticker: str,
             except Exception as e:
                 log.append(f"dl:{type(e).__name__}")
 
-        # 方法C：fast_info 只補最後一根收盤（近似K線）
+        # 方法C（fast_info 合成K線）已移除：
+        # 它會產生 OHLC 全等、Volume=0 的假K線，污染量比/ATR/型態/訊號強度。
         if df.index[-1].date() < missing[-1]:
-            try:
-                px = float(tk.fast_info.last_price)
-                add = pd.DataFrame([{
-                    'Open': px, 'High': px, 'Low': px,
-                    'Close': px, 'Volume': 0,
-                }], index=[pd.Timestamp(missing[-1])])
-                df = _concat_keep_attrs(df, add)
-                log.append(f"fast_info:補1根@{px:.2f}")
-            except Exception as e:
-                log.append(f"fast_info:{type(e).__name__}")
+            log.append(f"patch:仍落後至{df.index[-1].date()}(拒絕製造合成K線)")
 
     except Exception as e:
         log.append(f"patch:例外({type(e).__name__})")
+
+    # ── 最後防線：任何零成交量K線都不得進入分析（patch 繞過了 _clean）────────
+    if 'Volume' in df.columns:
+        bad = df[df['Volume'].fillna(0) <= 0]
+        if len(bad) > 0:
+            df = df[df['Volume'].fillna(0) > 0]
+            log.append(f"guard:剔除{len(bad)}根零成交K線")
 
     return df
 
