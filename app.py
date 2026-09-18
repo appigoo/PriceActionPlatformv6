@@ -2719,6 +2719,10 @@ def render_ticker(ctx: dict):
         # 抓取策略（詳細診斷移至「數據診斷」面板，徽章只保留關鍵訊息）
         _strategy  = getattr(df, "attrs", {}).get("strategy", "unknown")
         _strat_tip = f" · {_strategy}" if _strategy not in ("none", "unknown", "") else ""
+        # 盤中未收盤的K線要明確標示，避免被當成已定案的日線來解讀
+        _partial = getattr(df, "attrs", {}).get("partial_last_bar", "")
+        if _partial:
+            _strat_tip += " · ⏳盤中未完成"
         if _trading_days_old >= 2:
             _fresh_badge = (f"<span style='background:#fdecea;color:#c0392b;border-radius:4px;"
                            f"padding:1px 7px;font-size:.66rem;margin-left:8px'>"
