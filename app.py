@@ -1567,9 +1567,10 @@ def _render_gap_history(df, ticker: str, interval: str):
                 )
             st.markdown(_log_html, unsafe_allow_html=True)
 
-        _raw_d  = _at.get("raw_latest", "")
-        _nan_d  = _at.get("filtered_nan", [])
-        _zero_d = _at.get("filtered_zero_vol", [])
+        _raw_d   = _at.get("raw_latest", "")
+        _nan_d   = _at.get("filtered_nan", [])
+        _zero_d  = _at.get("filtered_zero_vol", [])
+        _degen_d = _at.get("filtered_degenerate", "")
         _notes  = []
         if _raw_d and _raw_d != str(df.index[-1])[:10]:
             _notes.append(f"yfinance 原始回傳最新日期 {_raw_d}")
@@ -1577,6 +1578,8 @@ def _render_gap_history(df, ticker: str, interval: str):
             _notes.append(f"因 OHLC 全為 NaN 被剔除：{'、'.join(_nan_d)}")
         if _zero_d:
             _notes.append(f"因成交量為 0 被剔除：{'、'.join(_zero_d)}")
+        if _degen_d:
+            _notes.append(f"⚠️ 因疑似未完整更新的佔位K線被剔除（開=高=低=收且極度縮量）：{_degen_d}")
         if _notes:
             st.caption("　|　".join(_notes))
         # Gap check with ATR filter diagnosis
