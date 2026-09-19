@@ -31,6 +31,21 @@ def _concat_keep_attrs(base: pd.DataFrame, add: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _is_degenerate_bar(row: pd.Series, recent_avg_vol: float) -> bool:
+    """
+    判斷一根K線是否為「尚未完整更新的佔位K線」：
+    開=高=低=收（零波動）且成交量遠低於近期均量。
+    這是資料源給了合法格式、卻不完整的快照時的典型特徵——
+    跟之前用 fast_info 捏造合成K線是同一類問題，差別只在來源不同。
+    共用給 _clean()（初次抓取）和 _patch_missing_days()（事後補值）使用，
+    確保不管哪條路徑產生的K線，都用同一道標準把關。
+    """
+    flat = (row['Open'] == row['High'] == row['Low'] == row['Close'])
+    if not flat:
+        return False
+    return recent_avg_vol > 0 and row['Volume'] < recent_avg_vol * 0.5
+
+
 def _fetch_via_curl(ticker: str, interval: str, lookback_days: int,
                     log: list) -> pd.DataFrame | None:
     """
@@ -121,12 +136,18 @@ def _fetch_via_curl(ticker: str, interval: str, lookback_days: int,
             log.append("curl:全部NaN")
             return None
 
-        idx = pd.to_datetime(idxs, unit='s', utc=True).tz_convert('America/New_York')
+        idx = pd.to_datetime(idxs, unit='s', utc=True)
         df  = pd.DataFrame(rows, index=idx)
 
         if interval in ('1d', '1wk'):
+            # 直接用「原始UTC時間戳」的日期，不先轉紐約時區。
+            # 日線錨點是當天美東開盤(13:30 UTC)，不跨日，兩種做法結果一樣；
+            # 週線錨點是當週一 00:00 UTC，若先轉ET(UTC-4/5)會被推回前一天(週日)，
+            # 導致每根週K線的日期標籤全部錯位一天。故一律取UTC日期。
             df.index = df.index.normalize().tz_localize(None)
             df = df[~df.index.duplicated(keep='last')]
+        else:
+            df.index = df.index.tz_convert('America/New_York')
 
         if len(df) < 5:
             log.append(f"curl:僅{len(df)}根")
@@ -185,6 +206,17 @@ def fetch_ohlcv(ticker: str, interval: str, bar_count: int = 120) -> pd.DataFram
             if len(zero) > 0:
                 meta['filtered_zero_vol'] = [str(d)[:10] for d in zero.index[-3:]]
             out = out[out["Volume"] > 0]
+
+        # ── 退化最新K線防護 ──────────────────────────────────────────────
+        # 只檢查「最後一根」：開=高=低=收（零波動）且成交量遠低於近期均量，
+        # 是「尚未完整更新/佔位K線」的典型特徵（跟之前 fast_info 合成K線
+        # 同一類問題：資料源給了一個看起來合法、實則不完整的快照）。
+        # 寧可少顯示最新一根、標示落後，也不讓它悄悄污染型態/趨勢/評分。
+        if len(out) >= 11:
+            recent_avg_vol = out['Volume'].iloc[-11:-1].mean()
+            if _is_degenerate_bar(out.iloc[-1], recent_avg_vol):
+                meta['filtered_degenerate'] = str(out.index[-1])[:10]
+                out = out.iloc[:-1]
 
         return out if len(out) >= 10 else None
 
@@ -326,7 +358,12 @@ def _patch_missing_days(df: pd.DataFrame, tk, ticker: str,
                     iidx = iidx.tz_convert('America/New_York')
                 days = np.array([t.date() for t in iidx])
 
-                rebuilt_idx, rebuilt_rows, skipped = [], [], []
+                rebuilt_idx, rebuilt_rows = [], []
+                skipped_zero_vol, skipped_degen = [], []
+                # 用「補值前」既有日線的近期均量作基準，判斷重建出來的
+                # 這一根是否也是退化的佔位K線（同一份防護，套用在補值路徑上）
+                base_avg_vol = (df['Volume'].iloc[-10:].mean()
+                                if 'Volume' in df.columns and len(df) >= 10 else 0)
                 for md in missing:
                     sel = intra[days == md]
                     if len(sel) == 0:
@@ -334,16 +371,22 @@ def _patch_missing_days(df: pd.DataFrame, tk, ticker: str,
                     vol_sum = float(sel['Volume'].sum())
                     if vol_sum <= 0:
                         # 有K線但無成交（盤前掛單/資料佔位）→ 不補，避免製造假K線
-                        skipped.append(str(md))
+                        skipped_zero_vol.append(str(md))
                         continue
-                    rebuilt_idx.append(pd.Timestamp(md))
-                    rebuilt_rows.append({
+                    rebuilt_row = pd.Series({
                         'Open':   float(sel['Open'].iloc[0]),
                         'High':   float(sel['High'].max()),
                         'Low':    float(sel['Low'].min()),
                         'Close':  float(sel['Close'].iloc[-1]),
                         'Volume': vol_sum,
                     })
+                    if _is_degenerate_bar(rebuilt_row, base_avg_vol):
+                        # 重建結果本身也是「零波動+極度縮量」→ 同樣視為
+                        # 未完整更新的佔位資料，不補，寧可顯示落後
+                        skipped_degen.append(str(md))
+                        continue
+                    rebuilt_idx.append(pd.Timestamp(md))
+                    rebuilt_rows.append(rebuilt_row.to_dict())
 
                 if rebuilt_rows:
                     add = pd.DataFrame(rebuilt_rows, index=rebuilt_idx)
@@ -353,9 +396,11 @@ def _patch_missing_days(df: pd.DataFrame, tk, ticker: str,
                     if rebuilt_idx[-1].date() == today_et and market_open_now:
                         df.attrs['partial_last_bar'] = str(today_et)
                         log.append(f"5m:末根為盤中未完成({today_et})")
-                if skipped:
-                    log.append(f"5m:零成交跳過({','.join(skipped)})")
-                if not rebuilt_rows and not skipped:
+                if skipped_zero_vol:
+                    log.append(f"5m:零成交跳過({','.join(skipped_zero_vol)})")
+                if skipped_degen:
+                    log.append(f"5m:退化(開高低收全等+極度縮量)跳過({','.join(skipped_degen)})")
+                if not rebuilt_rows and not skipped_zero_vol and not skipped_degen:
                     avail = sorted(set(days))[-3:]
                     log.append(f"5m:無對應日(有{','.join(str(a) for a in avail)})")
         except Exception as e:
@@ -385,6 +430,19 @@ def _patch_missing_days(df: pd.DataFrame, tk, ticker: str,
                         add = add[add['Volume'].fillna(0) > 0]
                         if before > len(add):
                             log.append(f"dl:濾掉{before-len(add)}根零成交")
+                    if len(add) > 0:
+                        # 同樣防護：yf.download 的 O/H/L 缺值用 Close 填補，
+                        # 若剛好連續三個都缺值，會產生開=高=低=收的退化列，
+                        # 只是成交量非零就不會被上面那道過濾攔到，這裡補上判斷
+                        base_avg_vol = (df['Volume'].iloc[-10:].mean()
+                                        if len(df) >= 10 else 0)
+                        degen_mask = add.apply(
+                            lambda r: _is_degenerate_bar(r, base_avg_vol), axis=1
+                        )
+                        if degen_mask.any():
+                            log.append(f"dl:濾掉{int(degen_mask.sum())}根退化列"
+                                       f"({','.join(str(d)[:10] for d in add.index[degen_mask][-3:])})")
+                            add = add[~degen_mask]
                     if len(add) > 0:
                         df = _concat_keep_attrs(df, add)
                         log.append(f"dl:補{len(add)}根")
