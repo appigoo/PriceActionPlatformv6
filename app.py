@@ -1530,6 +1530,7 @@ def _render_gap_history(df, ticker: str, interval: str):
         fig.update_xaxes(rangebreaks=[dict(bounds=["sat","mon"])])
 
     st.plotly_chart(fig, use_container_width=True,
+                    key=f"gap_dist_chart_{ticker}_{interval}",
                     config={"scrollZoom": True, "displaylogo": False})
 
     # ── 數據診斷（Debug）────────────────────────────────────────────────────
@@ -1801,6 +1802,7 @@ def _render_gap_history(df, ticker: str, interval: str):
             st.markdown("<div class='section-heading' style='font-size:.85rem'>📈 跳空後平均走勢對比</div>",
                         unsafe_allow_html=True)
             st.plotly_chart(fig_gap, use_container_width=True,
+                            key=f"gap_avg_trend_chart_{ticker}_{interval}",
                             config={"displaylogo": False, "scrollZoom": False})
 
     # ── 主觀交易建議 ──────────────────────────────────────────────────────────
@@ -2081,6 +2083,7 @@ def _render_volatility_spike(df, ticker: str, interval: str,
         fig.update_xaxes(rangebreaks=[dict(bounds=["sat","mon"])])
 
     st.plotly_chart(fig, use_container_width=True,
+                    key=f"spike_history_chart_{ticker}_{interval}",
                     config={"scrollZoom": True, "displaylogo": False})
 
     # ── 歷史觸發詳細表格 ─────────────────────────────────────────────────────
@@ -2286,6 +2289,7 @@ def _render_volatility_spike(df, ticker: str, interval: str,
         st.markdown("<div class='section-heading' style='font-size:.85rem'>📊 觸發後平均走勢（方案A）</div>",
                     unsafe_allow_html=True)
         st.plotly_chart(fig_after, use_container_width=True,
+                        key=f"spike_avg_trend_chart_{ticker}_{interval}",
                         config={"displaylogo": False, "scrollZoom": False})
 
         # ── 歷史推測 ──────────────────────────────────────────────────────────
@@ -2821,7 +2825,9 @@ def render_ticker(ctx: dict):
     # chart
     st.markdown("<div class='section-heading'>📈 K線圖表 · 市場結構 · 訊號</div>", unsafe_allow_html=True)
     fig = build_chart(df, ticker, interval, sr_levels, signals, market_struct, patterns)
-    st.plotly_chart(fig, use_container_width=True, config={"scrollZoom":True,"displaylogo":False})
+    st.plotly_chart(fig, use_container_width=True,
+                    key=f"main_kline_chart_{ticker}_{interval}",
+                    config={"scrollZoom":True,"displaylogo":False})
 
     col_l, col_r = st.columns([3, 2])
     with col_l:
@@ -3170,7 +3176,8 @@ def render_ticker(ctx: dict):
             title=dict(text='Equity Curve（每筆交易固定風險1%權益）',font=dict(family='Noto Sans TC',size=11,color='#6b6560'),x=.01),
             xaxis=dict(showgrid=False,tickfont=dict(size=8,color='#9e9890')),
             yaxis=dict(gridcolor='#ede9e3',tickfont=dict(size=8,color='#9e9890')))
-        st.plotly_chart(efig, use_container_width=True)
+        st.plotly_chart(efig, use_container_width=True,
+                        key=f"backtest_equity_chart_{ticker}_{interval}")
 
     # ── 跳空歷史分析區塊 ─────────────────────────────────────────────────────
     st.markdown("<div class='section-heading'>🕳️ 跳空歷史分析</div>", unsafe_allow_html=True)
