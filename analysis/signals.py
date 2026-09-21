@@ -242,9 +242,6 @@ def generate_signals(df, patterns, market_struct, volume_analysis, sr_levels) ->
                 "neckline": p.get('neckline', 0),
             })
 
-    # ── 歷史訊號（回測用）────────────────────────────────────────────────
-    signal_history = _generate_historical_signals(df, market_struct)
-
     return {
         "primary":          primary,
         "strength":         strength,
@@ -268,23 +265,4 @@ def generate_signals(df, patterns, market_struct, volume_analysis, sr_levels) ->
             "atr":              atr,
             "reward_atr":       reward_atr_ratio,
         },
-        "signal_history": signal_history,
     }
-
-
-def _generate_historical_signals(df, market_struct):
-    signals = []
-    closes = df['Close'].values
-    vols   = df['Volume'].values
-    n = len(df)
-    avg_vol = np.mean(vols[-20:]) if n >= 20 else np.mean(vols)
-
-    for i in range(5, n - 1):
-        momentum = (closes[i] - closes[i-5]) / (closes[i-5] + 1e-9)
-        vr = vols[i] / (avg_vol + 1e-9)
-        if momentum > 0.02 and vr > 1.3:
-            signals.append({"index": i, "type": "BUY",  "price": closes[i]})
-        elif momentum < -0.02 and vr > 1.3:
-            signals.append({"index": i, "type": "SELL", "price": closes[i]})
-
-    return signals
