@@ -3103,20 +3103,58 @@ def render_ticker(ctx: dict):
 
     # backtest
     st.markdown("<div class='section-heading'>📉 回測系統</div>", unsafe_allow_html=True)
-    bt = run_backtest(df, signals.get('signal_history',[]))
-    bc = st.columns(5)
-    for col,(lbl,val,good) in zip(bc,[
-        ("勝率",     f"{bt.get('win_rate',0):.1f}%",    bt.get('win_rate',0)>50),
-        ("盈虧比",   f"{bt.get('profit_factor',0):.2f}", bt.get('profit_factor',0)>1.5),
-        ("最大回撤", f"{bt.get('max_dd',0):.1f}%",       bt.get('max_dd',0)<15),
-        ("交易次數", str(bt.get('total_trades',0)),       True),
-        ("淨收益率", f"{bt.get('net_return',0):.1f}%",   bt.get('net_return',0)>0),
-    ]):
-        color = "#3d8c5f" if good else "#c0392b"
-        with col:
+    bt_strict_mode = st.toggle(
+        "只計入系統判斷「風報比可接受」的訊號（略過⚠️不建議入場的訊號）",
+        value=True,
+        key=f"bt_strict_{ticker}",
+        help="關閉後會連系統自己標記⚠️不建議入場的訊號也一併回測，"
+             "可用來對照『有沒有聽系統的風險警告』差異多大。"
+    )
+    bt = run_backtest(df, require_good_rrr=bt_strict_mode)
+    st.caption(
+        "事件驅動回測：在歷史每一根K線上只用「當時已知」的資料重跑一次"
+        "真正的訊號邏輯（跟上方圖表用的是同一套規則），並用當時的 ATR 止損/"
+        "目標價逐根判斷勝負——不是另一套簡化模型，也不使用未來資料。"
+    )
+
+    if bt.get("total_trades", 0) < 3:
+        st.warning(
+            f"⚠️ {bt.get('insufficient_reason', '樣本不足')}。"
+            f"下方數字僅供參考，不構成統計意義上的可靠結論；"
+            f"可嘗試增加K線數量以取得更多交易樣本。"
+        )
+    else:
+        if bt.get("total_trades", 0) < 10:
+            st.info(f"⚠️ 樣本數僅 {bt['total_trades']} 筆，統計可靠性有限，"
+                    f"建議增加K線數量以取得更穩健的結果。")
+
+        bc = st.columns(5)
+        for col,(lbl,val,good) in zip(bc,[
+            ("勝率",     f"{bt.get('win_rate',0):.1f}%",    bt.get('win_rate',0)>50),
+            ("盈虧比",   f"{bt.get('profit_factor',0):.2f}", bt.get('profit_factor',0)>1.5),
+            ("最大回撤", f"{bt.get('max_dd',0):.1f}%",       bt.get('max_dd',0)<15),
+            ("交易次數", str(bt.get('total_trades',0)),       True),
+            ("淨收益率", f"{bt.get('net_return',0):.1f}%",   bt.get('net_return',0)>0),
+        ]):
+            color = "#3d8c5f" if good else "#c0392b"
+            with col:
+                st.markdown(f"""<div class='metric-card' style='text-align:center'>
+                  <div class='metric-label'>{lbl}</div>
+                  <div class='metric-value' style='color:{color};font-size:1.3rem'>{val}</div>
+                </div>""", unsafe_allow_html=True)
+
+        bc2 = st.columns(2)
+        with bc2[0]:
             st.markdown(f"""<div class='metric-card' style='text-align:center'>
-              <div class='metric-label'>{lbl}</div>
-              <div class='metric-value' style='color:{color};font-size:1.3rem'>{val}</div>
+              <div class='metric-label'>平均 R 倍數</div>
+              <div class='metric-value' style='color:#6b6560;font-size:1.1rem'>
+                {bt.get('avg_r_multiple',0):+.2f}R</div>
+            </div>""", unsafe_allow_html=True)
+        with bc2[1]:
+            st.markdown(f"""<div class='metric-card' style='text-align:center'>
+              <div class='metric-label'>平均持倉根數</div>
+              <div class='metric-value' style='color:#6b6560;font-size:1.1rem'>
+                {bt.get('avg_hold_bars',0):.1f} 根</div>
             </div>""", unsafe_allow_html=True)
 
     # equity curve
@@ -3129,7 +3167,7 @@ def render_ticker(ctx: dict):
                                   fill='tozeroy',fillcolor=ef))
         efig.update_layout(plot_bgcolor='#fff',paper_bgcolor='#f9f7f4',height=160,
             margin=dict(l=45,r=15,t=28,b=25),showlegend=False,
-            title=dict(text='Equity Curve',font=dict(family='Noto Sans TC',size=11,color='#6b6560'),x=.01),
+            title=dict(text='Equity Curve（每筆交易固定風險1%權益）',font=dict(family='Noto Sans TC',size=11,color='#6b6560'),x=.01),
             xaxis=dict(showgrid=False,tickfont=dict(size=8,color='#9e9890')),
             yaxis=dict(gridcolor='#ede9e3',tickfont=dict(size=8,color='#9e9890')))
         st.plotly_chart(efig, use_container_width=True)
