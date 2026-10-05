@@ -76,7 +76,7 @@ from charts.candlestick_chart    import build_chart
 def _ss(key, val):
     if key not in st.session_state: st.session_state[key] = val
 
-_ss("stock_list",    ["QQQ","AAPL","META","TSM","XOM","MSFT","NVDA","TSLA","AMD","INTC","GOOGL","XPEV","NIO","VST","RKLB","TSLL","SPCX","ARM","SNDK","MU","NKE"])
+_ss("stock_list",    ["TSLA", "NVDA", "META", "AAPL"])
 _ss("cached",        {})      # {ticker: result_dict}
 _ss("monitors",      {})      # {ticker: {levels, triggered, active}}
 _ss("alert_hashes",  set())
@@ -1023,6 +1023,8 @@ def _build_ai_prompt(ticker, interval_lbl, df, patterns, market_struct,
         f'關鍵支撐：${trade.get("key_support", 0):.2f}',
         f'關鍵阻力：${trade.get("key_resistance", 0):.2f}',
         f'突破價位：${trade.get("breakout_level", 0):.2f}',
+        (f'目標價：${trade.get("target", 0):.2f}'
+         + ('（最近一層距離過近，已延伸至次近支撐/阻力層）' if trade.get("target_extended") else '')),
         f'ATR（14日）：${atr_val:.2f}',
         f'止損位：${trade.get("stop_loss", 0):.2f}（基於 ATR）',
         f'風報比：{trade.get("rrr", "N/A")}（收益空間 {reward_atr:.1f} ATR）',
@@ -2988,6 +2990,8 @@ def render_ticker(ctx: dict):
         _kr = trade.get('key_resistance',0)
         _bp = trade.get('breakout_level',0)
         _sl = trade.get('stop_loss',0)
+        _tg = trade.get('target', 0)
+        _tg_ext      = trade.get('target_extended', False)
         _rrr_str     = trade.get('rrr', '-')
         _rrr_poor    = trade.get('rrr_poor', False)
         _too_close   = trade.get('too_close', False)
@@ -3019,6 +3023,12 @@ def render_ticker(ctx: dict):
             + "</div>"
         ) if _atr_val > 0 else ""
 
+        _target_note = (
+            "<div style='font-size:.68rem;color:#b07d2e;padding:2px 0 4px'>"
+            "⚡ 最近一層支撐/阻力距離過近，已改用次近層作為目標價"
+            "（仍是真實偵測到的支撐阻力，非憑空設定）</div>"
+        ) if _tg_ext else ""
+
         st.markdown(
             "<div class='white-card'>"
             + _row("短線方向", trade.get("short_term","-"), _cc(trade.get("short_term","")))
@@ -3026,9 +3036,10 @@ def render_ticker(ctx: dict):
             + _row("關鍵支撐", f"${_ks:.2f}")
             + _row("關鍵阻力", f"${_kr:.2f}")
             + _row("突破價位", f"${_bp:.2f}")
+            + _row("目標價",   f"${_tg:.2f}" + ("（延伸）" if _tg_ext else ""))
             + _row("止損位",   f"${_sl:.2f}（ATR）", "bear")
             + _row("風報比",   _rrr_str, "bear" if _any_warn else "")
-            + _atr_note + _warn_html + "</div>",
+            + _atr_note + _target_note + _warn_html + "</div>",
             unsafe_allow_html=True
         )
 
