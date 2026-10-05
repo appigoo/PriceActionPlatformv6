@@ -181,11 +181,32 @@ def generate_signals(df, patterns, market_struct, volume_analysis, sr_levels) ->
         tr_list.append(tr)
     atr = float(np.mean(tr_list)) if tr_list else current * 0.02
 
+    # ── 目標價選取：最近一層支撐/阻力太近時，嘗試改用次近一層 ───────────────
+    # 背景：支撐阻力偵測用局部極值，間距天生緊密，單純用「最近一層」當
+    # 目標價會讓「收益空間不足」幾乎永遠觸發（實測約75%的訊號都被標記，
+    # 但其中四成其實有真實存在的次近層可用、只是從來沒被嘗試過）。
+    # 次近層若落在 1.5~5 ATR 之間才採用（太近沒解決問題，太遠則是用一個
+    # 不切實際的遠期目標美化風報比，兩者都不誠實，所以設上限）。
+    EXT_MIN_ATR, EXT_MAX_ATR = 1.5, 5.0
+
+    def _pick_target(levels_sorted_near_first, near_level):
+        """回傳 (target, extended) — levels 已由近到遠排序"""
+        reward0 = abs(near_level - current)
+        ratio0  = reward0 / atr if atr > 0 else 0
+        if ratio0 >= EXT_MIN_ATR or len(levels_sorted_near_first) < 2:
+            return near_level, False
+        next_level = levels_sorted_near_first[1]
+        reward1    = abs(next_level - current)
+        ratio1     = reward1 / atr if atr > 0 else 0
+        if EXT_MIN_ATR <= ratio1 <= EXT_MAX_ATR:
+            return next_level, True
+        return near_level, False   # 次近層仍不足或太離譜，保留原本的警告邏輯
+
     if primary == "BUY":
         # 止損：支撐下方 0.5ATR（貼近支撐，不過緊也不過寬）
         stop_loss = key_support - atr * 0.5
         stop_loss = max(stop_loss, current * 0.94)   # 最多虧 6%
-        target    = key_resistance
+        target, target_extended = _pick_target(res_candidates, key_resistance)
         risk      = max(current - stop_loss, 0.01)
         reward    = max(target  - current,  0.01)
         short_dir = "看多 📈"
@@ -193,13 +214,14 @@ def generate_signals(df, patterns, market_struct, volume_analysis, sr_levels) ->
         # 止損：阻力上方 0.5ATR（以阻力為基準，不用當前價）
         stop_loss = key_resistance + atr * 0.5
         stop_loss = min(stop_loss, current * 1.06)   # 最多虧 6%
-        target    = key_support
+        target, target_extended = _pick_target(sup_candidates, key_support)
         risk      = max(stop_loss - current, 0.01)
         reward    = max(current   - target,  0.01)
         short_dir = "看空 📉"
     else:
         stop_loss = current - atr
         target    = current + atr
+        target_extended = False
         risk      = current - stop_loss
         reward    = target  - current
         short_dir = "觀望 ⟷"
@@ -211,6 +233,7 @@ def generate_signals(df, patterns, market_struct, volume_analysis, sr_levels) ->
     rrr_poor = reward_risk_ratio < 1.0
 
     # 距目標太近警告：收益 < 1.5 ATR → 不適合此刻入場
+    # （若已採用次近層延伸目標，reward 已經是延伸後的值，不會再誤觸發）
     reward_atr_ratio = reward / atr if atr > 0 else 0
     too_close_to_target = reward_atr_ratio < 1.5   # 收益空間不足1.5個ATR
 
@@ -258,6 +281,8 @@ def generate_signals(df, patterns, market_struct, volume_analysis, sr_levels) ->
             "key_resistance":   key_resistance,
             "breakout_level":   breakout_level,
             "stop_loss":        stop_loss,
+            "target":           target,
+            "target_extended":  target_extended,
             "rrr":              rrr,
             "rrr_poor":         rrr_poor,
             "too_close":        too_close_to_target,
