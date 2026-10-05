@@ -79,11 +79,11 @@ def _resolve_trade_setup(sub_df: pd.DataFrame, require_good_rrr: bool = True):
 
     entry_price = float(sub_df["Close"].iloc[-1])
     stop_loss   = trade.get("stop_loss")
-    # generate_signals 內部用 target = key_resistance(BUY) / key_support(SELL)
-    # 算風報比，但沒有把 target 直接存進 trade_setup，這裡用同一套邏輯還原，
-    # 確保回測用的目標價跟即時畫面顯示的關鍵阻力/支撐完全一致。
-    target = (trade.get("key_resistance") if primary == "BUY"
-              else trade.get("key_support"))
+    # target 直接讀 trade_setup 裡的欄位（而非從 key_support/key_resistance
+    # 重新推導）——因為目標價現在可能是延伸後的次近支撐/阻力層
+    # （見 signals.py 的 target_extended 機制），兩者不再保證相等，
+    # 直接讀取才能確保回測跟即時畫面用的是同一個目標價。
+    target = trade.get("target")
 
     if stop_loss is None or target is None:
         return None, None, None, None
