@@ -116,24 +116,77 @@ def analyze_market_structure(df: pd.DataFrame) -> dict:
         macro_lh = sh_global[-1][1] < sh_global[-2][1]
         macro_ll = sl_global[-1][1] < sl_global[-2][1]
 
-    # ── 趨勢判斷（局部結構 + EMA 大趨勢結合）────────────────────────────────
+    # ── 即時結構檢查（補償擺動點的確認延遲）────────────────────────────────
+    # 擺動點必須等右側 window 根K線才算「確認」，所以最新幾根的急跌/急漲，
+    # 在確認之前完全不會出現在 HH/HL/LH/LL 裡。實測：真正的頂部要在價格已
+    # 回落 5% 以上才被確認成新的 Higher High，結果「頂部被確認」的那一刻反而
+    # 被解讀成「創新高=多頭趨勢」，標籤隨下跌越走越看多，強度還給到 85。
+    # 因此在擺動點結構之上疊加兩個「不需要等確認」的即時證據：
+    #   1. 收盤價是否已跌破/突破「最近一個已確認的 HL / LH」
+    #      （上升結構失守 = SMC 的 CHoCH，定義上趨勢結構已被破壞）
+    #   2. 價格是否同時跌破/站上 EMA20 與 EMA50（趨勢濾網，兩條都失守才算）
+    last_hl_price  = sl_use[-1][1]
+    last_lh_price  = sh_use[-1][1]
+    below_both_ema = current < ema20[-1] and current < ema50[-1]
+    above_both_ema = current > ema20[-1] and current > ema50[-1]
+    hl_broken      = current < last_hl_price
+    lh_broken      = current > last_lh_price
+    structure_state = "intact"   # intact | pullback | broken
+
+    # ── 趨勢判斷（局部結構 + EMA 大趨勢 + 即時結構檢查）──────────────────────
     if hh and hl:
-        if global_bull:
-            trend = "多頭趨勢"
-            sub   = "Higher High + Higher Low，主趨勢多頭延續"
+        if hl_broken:
+            # 擺動點仍顯示 HH+HL，但收盤已跌破最近的 Higher Low → 上升結構失守
+            trend = "結構轉空"
+            sub   = (f"擺動結構曾為 HH+HL，但收盤 ${current:.2f} 已跌破前一個 "
+                     f"Higher Low（${last_hl_price:.2f}），上升結構失守（CHoCH）")
+            swing_desc    = "HH ▲ + HL ▲（HL 已跌破）"
+            strength_base = 35
+            structure_state = "broken"
+        elif global_bull:
+            if below_both_ema:
+                # 結構未破，但價格已同時失守 EMA20 與 EMA50：多頭承壓，不是健康趨勢
+                trend = "多頭回調"
+                sub   = (f"擺動結構仍為 HH+HL，但價格已跌破 EMA20 與 EMA50，多頭承壓；"
+                         f"關鍵看前一個 Higher Low（${last_hl_price:.2f}）能否守住")
+                swing_desc    = "HH ▲ + HL ▲（回調承壓）"
+                strength_base = 55
+                structure_state = "pullback"
+            else:
+                trend = "多頭趨勢"
+                sub   = "Higher High + Higher Low，主趨勢多頭延續"
+                swing_desc    = "HH ▲ + HL ▲"
+                strength_base = 80
         else:
             trend = "局部多頭反彈"
             sub   = "近期出現 HH + HL 結構，大趨勢仍偏空，注意上方阻力"
-        swing_desc    = "HH ▲ + HL ▲"
-        strength_base = 80 if global_bull else 62
+            swing_desc    = "HH ▲ + HL ▲"
+            strength_base = 62
 
     elif lh and ll:
-        # 再確認：如果局部點顯示 LH+LL，但 EMA20 已明顯回升，降低空頭權重
-        if local_bull:
+        if lh_broken:
+            # 鏡像：擺動點仍顯示 LH+LL，但收盤已突破最近的 Lower High → 下降結構失守
+            trend = "結構轉多"
+            sub   = (f"擺動結構曾為 LH+LL，但收盤 ${current:.2f} 已突破前一個 "
+                     f"Lower High（${last_lh_price:.2f}），下降結構失守（CHoCH）")
+            swing_desc    = "LH ▼ + LL ▼（LH 已突破）"
+            strength_base = 65
+            structure_state = "broken"
+        elif local_bull:
+            # 再確認：如果局部點顯示 LH+LL，但 EMA20 已明顯回升，降低空頭權重
             trend = "局部反彈中"
             sub   = "擺動結構仍為 LH+LL，但 EMA20 開始上翹，局部動能轉強"
             swing_desc    = "LH ▼ + LL ▼（EMA20 回升）"
             strength_base = 38
+            structure_state = "pullback"
+        elif above_both_ema:
+            # 鏡像於「多頭回調」：價格已同時站上 EMA20 與 EMA50，空頭承壓
+            trend = "局部反彈中"
+            sub   = (f"擺動結構仍為 LH+LL，但價格已站上 EMA20 與 EMA50，空頭承壓；"
+                     f"關鍵看前一個 Lower High（${last_lh_price:.2f}）能否壓住")
+            swing_desc    = "LH ▼ + LL ▼（站上均線）"
+            strength_base = 38
+            structure_state = "pullback"
         else:
             trend = "空頭趨勢"
             sub   = "Lower High + Lower Low，空頭結構完整"
@@ -159,13 +212,28 @@ def analyze_market_structure(df: pd.DataFrame) -> dict:
         strength_base = 45
 
     # ── 趨勢反轉偵測 ─────────────────────────────────────────────────────────
+    # reversal_bias 是給評分系統用的「明確方向欄位」，取代過去 signals.py 靠
+    # 「文字裡有沒有『多頭』二字」來判斷方向的做法——那會讓「頂部反轉」這種
+    # 看空警告（文字裡也有『多頭』）反過來幫買方加分。
+    #   'bull' = 看多反轉   'bear' = 看空反轉   'bull_weak' = 弱證據（不計分）
+    #   '' = 無，或已由「結構轉空/結構轉多」標籤本身計分（避免重複計分）
     reversal_signal = ""
-    if global_bear and hh and hl:
+    reversal_bias   = ""
+    if hh and hl and hl_broken:
+        reversal_signal = (f"⚠️ 收盤 ${current:.2f} 已跌破前一個 Higher Low"
+                           f"（${last_hl_price:.2f}），上升結構失守（CHoCH）")
+    elif lh and ll and lh_broken:
+        reversal_signal = (f"⚠️ 收盤 ${current:.2f} 已突破前一個 Lower High"
+                           f"（${last_lh_price:.2f}），下降結構失守（CHoCH）")
+    elif global_bear and hh and hl:
         reversal_signal = "⚠️ 大趨勢空頭中出現局部多頭結構（HH+HL），疑似底部反轉初期"
+        reversal_bias   = "bull"
     elif global_bear and local_bull and not (lh and ll):
         reversal_signal = "⚠️ EMA20 開始回升，局部動能轉多，空頭結構可能弱化"
+        reversal_bias   = "bull_weak"
     elif global_bull and lh and ll:
         reversal_signal = "⚠️ 大趨勢多頭中出現局部空頭結構（LH+LL），疑似頂部反轉初期"
+        reversal_bias   = "bear"
 
     # ── 趨勢強度 ─────────────────────────────────────────────────────────────
     strength       = strength_base
@@ -173,7 +241,8 @@ def analyze_market_structure(df: pd.DataFrame) -> dict:
     above_ema50    = current > ema50[-1]
     ema_aligned    = ema20[-1] > ema50[-1]
 
-    if "多頭" in trend:
+    # 「多頭回調」的價格定義上就在兩條 EMA 之下，不再給 EMA 加分
+    if "多頭" in trend and "回調" not in trend:
         if above_ema20:  strength = min(strength + 8,  100)
         if above_ema50:  strength = min(strength + 7,  100)
         if ema_aligned:  strength = min(strength + 5,  100)
