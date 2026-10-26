@@ -42,6 +42,18 @@ def generate_signals(df, patterns, market_struct, volume_analysis, sr_levels) ->
     elif "空頭趨勢" == trend:
         sell_score += 35
         sell_reasons.append("主趨勢空頭 (LH+LL)")
+    elif "結構轉空" == trend:
+        # 收盤已跌破最近的 Higher Low（CHoCH）。權重 20 為主觀設定、未經統計驗證，
+        # 刻意低於健康空頭趨勢的 35：結構失守是「轉折證據」，不等於空頭趨勢已確立
+        sell_score += 20
+        sell_reasons.append("多頭結構失守（收盤跌破前一個 Higher Low）")
+    elif "結構轉多" == trend:
+        buy_score += 20
+        buy_reasons.append("空頭結構失守（收盤突破前一個 Lower High）")
+    elif trend == "多頭回調":
+        # 結構未破但價格已失守 EMA20/50：跟「局部反彈中」同樣處理——擺動結構與
+        # 價格行為互相矛盾時結構分給 0，交給 EMA/量能/型態等維度決定方向
+        pass
     elif "橫盤收斂" == trend:
         # 收斂視乎突破方向
         if market_struct.get('above_ema20') and vol_r > 1.3:
@@ -128,11 +140,19 @@ def generate_signals(df, patterns, market_struct, volume_analysis, sr_levels) ->
         sell_score += 22
         sell_reasons.append("放量跌破支撐")
 
-    # ── 7. 流動性清洗加分（底部反轉）────────────────────────────────────
-    reversal_signal = market_struct.get('reversal_signal', '')
-    if reversal_signal and "多頭" in reversal_signal:
+    # ── 7. 反轉訊號加分 ───────────────────────────────────────────────────
+    # 修正：舊版用「reversal_signal 文字裡有沒有『多頭』二字」判斷方向，但
+    # 「大趨勢多頭中出現 LH+LL，疑似頂部反轉」這句看空警告本身就含「多頭」，
+    # 結果頂部反轉警告反而幫買方加 15 分（方向整個反了）。
+    # 改讀 market_structure 明確提供的 reversal_bias 欄位，bear 加給賣方。
+    # 'bull_weak'（僅 EMA20 回升的弱證據）維持舊行為：不計分。
+    reversal_bias = market_struct.get('reversal_bias', '')
+    if reversal_bias == 'bull':
         buy_score += 15
         buy_reasons.append("大空頭趨勢中局部多頭反轉訊號")
+    elif reversal_bias == 'bear':
+        sell_score += 15
+        sell_reasons.append("大多頭趨勢中出現局部空頭結構（疑似頂部反轉）")
 
     # ── 8. 最終訊號 ───────────────────────────────────────────────────────
     # 特殊情況：大趨勢空頭但局部多頭強烈——標記為「條件性多頭」
