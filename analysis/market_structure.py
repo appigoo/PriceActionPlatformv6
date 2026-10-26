@@ -89,6 +89,15 @@ def analyze_market_structure(df: pd.DataFrame) -> dict:
     # ── 選擇哪套擺動點做 HH/HL 判斷 ──────────────────────────────────────────
     # 優先用局部擺動點（更能反映最新市場方向）
     # 若局部點不足則 fallback 到全局點
+    # 已知限制（尚未處理，刻意不在這次修改範圍內）：
+    #  1. 高/低點各自獨立 fallback：局部（最近60根）只有一邊湊不到 2 個點時，
+    #     那一邊改用全域（window 較大）、另一邊仍用局部，等於拿不同尺度的擺動點互相比較。
+    #  2. HH/LH/HL/LL 用嚴格大小比較、沒有容忍區間：相隔幾根K線的兩個雜訊擺動點
+    #     （實測 712.2 vs 714.5，差 0.32%）就會被判成 Higher High。
+    #  實測：兩者合起來會把一條平滑緩跌（全域 LH+LL）標成「趨勢發散（HH+LL）」。
+    #  曾嘗試「高低點一起退回全域」與「同尺度拉長回看」兩種修法：前者讓剛形成的近期
+    #  峰谷（window 需右側 10 根才確認）消失，後者沒有解決上述案例，且都會改變既有
+    #  擺動點結構，在沒有真實資料驗證前不採用，已還原為原始行為。
     sh_use = sh_local if len(sh_local) >= 2 else sh_global
     sl_use = sl_local if len(sl_local) >= 2 else sl_global
 
@@ -279,6 +288,10 @@ def analyze_market_structure(df: pd.DataFrame) -> dict:
         "market_state":    market_state,
         "structure_break": struct_break,
         "reversal_signal": reversal_signal,
+        "reversal_bias":   reversal_bias,
+        "structure_state": structure_state,
+        "last_hl":         float(last_hl_price),
+        "last_lh":         float(last_lh_price),
         "swing_highs":     sh_display,
         "swing_lows":      sl_display,
         "ema20":           ema20,
@@ -306,7 +319,9 @@ def _default_struct(ema20, ema50, current, highs, lows, n,
         "trend": "橫盤整理", "sub_trend": "數據不足",
         "swing_desc": "N/A", "trend_strength": 45,
         "market_state": "觀望", "structure_break": "無",
-        "reversal_signal": "", "swing_highs": sh, "swing_lows": sl,
+        "reversal_signal": "", "reversal_bias": "",
+        "structure_state": "intact", "last_hl": None, "last_lh": None,
+        "swing_highs": sh, "swing_lows": sl,
         "ema20": ema20, "ema50": ema50,
         "global_bull": global_bull, "global_bear": global_bear,
         "local_bull": local_bull,
