@@ -201,7 +201,7 @@ def build_chart(df, ticker, interval, sr_levels, signals, market_struct, pattern
 
     # ── LAYOUT（附件風格：白底，淺灰網格，柔和字體）────────────────────────────
     trend = market_struct.get('trend', '')
-    trend_icon = "📈" if "多頭" in trend else ("📉" if "空頭" in trend else "⟷")
+    trend_icon = "⟷" if "回調" in trend else ("📈" if "多頭" in trend else ("📉" if "空頭" in trend else "⟷"))
 
     fig.update_layout(
         title=dict(
