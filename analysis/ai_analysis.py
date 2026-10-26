@@ -81,9 +81,31 @@ def generate_ai_analysis(ticker, df, patterns, market_struct, volume_analysis,
     # ══════════════════════════════════════════════════════════════════════════
     # 1. 市場結構
     # ══════════════════════════════════════════════════════════════════════════
+    _above20 = market_struct.get('above_ema20', False)
+    _above50 = market_struct.get('above_ema50', False)
     if trend == "多頭趨勢" and not global_bear:
+        # 舊版無條件寫「EMA 多頭排列，趨勢動能強勁」，但價格可能已跌破其中一條 EMA，
+        # 敘述必須跟實際的均線位置一致
+        if _above20 and _above50:
+            _ema_txt = "價格站穩 EMA20 與 EMA50 之上，趨勢動能完整"
+        elif _above50:
+            _ema_txt = "價格已跌破 EMA20 但仍守住 EMA50，短線轉弱需留意"
+        else:
+            _ema_txt = "價格位於 EMA50 之下，與多頭結構不一致，需留意"
         s1 = (f"{ticker} 確立 <b>{swing_desc}</b> 多頭結構，趨勢強度 {trend_str}/100。"
-              f"{sub_trend}，EMA20/EMA50 多頭排列，趨勢動能強勁。")
+              f"{sub_trend}，{_ema_txt}。")
+    elif trend == "多頭回調":
+        s1 = (f"⚠️ {ticker} {sub_trend}。趨勢強度降至 {trend_str}/100，"
+              f"<b>這是「承壓的多頭」，不是健康的多頭趨勢</b>——"
+              f"若收盤跌破前一個 Higher Low，結構將轉為破壞。")
+    elif trend == "結構轉空":
+        s1 = (f"🚨 {ticker} {sub_trend}。趨勢強度 {trend_str}/100。"
+              f"這是 SMC 的 CHoCH（性格轉變）：多頭結構不再成立，"
+              f"但空頭趨勢尚未確立，宜觀望或等待反彈確認。")
+    elif trend == "結構轉多":
+        s1 = (f"🚨 {ticker} {sub_trend}。趨勢強度 {trend_str}/100。"
+              f"這是 SMC 的 CHoCH（性格轉變）：空頭結構不再成立，"
+              f"但多頭趨勢尚未確立，宜觀望或等待回測確認。")
     elif trend == "局部多頭反彈":
         s1 = (f"⚠️ {ticker} 大趨勢仍為空頭（EMA50 向下），但局部出現 <b>{swing_desc}</b> 多頭結構。"
               f"此為空頭趨勢中底部反彈甚至趨勢反轉初期最典型形態，"
