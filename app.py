@@ -76,7 +76,7 @@ from charts.candlestick_chart    import build_chart
 def _ss(key, val):
     if key not in st.session_state: st.session_state[key] = val
 
-_ss("stock_list",    ["QQQ", "TSLA", "TSLL", "SPCX", "AAPL", "GOOGL", "XPEV", "NIO", "META", "MSFT", "NVDA", "AMD", "INTC", "TSM", "XOM", "VST", "RKLB", "ARM", "SNDK"])
+_ss("stock_list",    ["TSLA", "NVDA", "META", "AAPL"])
 _ss("cached",        {})      # {ticker: result_dict}
 _ss("monitors",      {})      # {ticker: {levels, triggered, active}}
 _ss("alert_hashes",  set())
@@ -2797,7 +2797,7 @@ def render_ticker(ctx: dict):
           <div class='metric-sub {chg_cls}'>{chg_icon} {abs(price_chg):.2f} ({abs(price_pct):.2f}%)</div>
         </div>""", unsafe_allow_html=True)
     with c2:
-        tc = "bull" if "多頭" in trend else ("bear" if "空頭" in trend else "gold")
+        tc = "gold" if "回調" in trend else ("bull" if "多頭" in trend else ("bear" if "空頭" in trend else "gold"))
         st.markdown(f"""<div class='metric-card'>
           <div class='metric-label'>趨勢結構</div>
           <div class='metric-value {tc}' style='font-size:1.05rem;padding-top:5px'>{trend}</div>
