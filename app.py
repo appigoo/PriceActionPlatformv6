@@ -1074,7 +1074,7 @@ with st.sidebar:
     # ── 批量輸入 ──────────────────────────────────────────────────────────────
     batch_input = st.text_input(
         "批量輸入（逗號分隔）",
-        placeholder="TSLA, AAPL, AMZN, META, ...",
+        placeholder="QQQ,TSLL,SPCX,AAPL,GOOGL,XPEV,NIO,MSFT,NVDA,VST,RKLB,MU,AVGO,NKE, ...",
         label_visibility="visible",
         key="batch_tk_input"
     )
